@@ -419,20 +419,16 @@ static void setPropIMP(id slf, SEL selector, id val, NSString *propName) {
     objc_setAssociatedObject(slf, propKey(propName), val, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-static char *methodTypesInProtocol(NSString *protocolName, NSString *selectorName, BOOL isInstanceMethod, BOOL isRequired)
+static char *methodTypesInProtocol(Protocol *protocol, SEL selector, BOOL isInstanceMethod, BOOL isRequired)
 {
-    Protocol *protocol = objc_getProtocol([trim(protocolName) cStringUsingEncoding:NSUTF8StringEncoding]);
-    unsigned int selCount = 0;
-    struct objc_method_description *methods = protocol_copyMethodDescriptionList(protocol, isRequired, isInstanceMethod, &selCount);
-    for (int i = 0; i < selCount; i ++) {
-        if ([selectorName isEqualToString:NSStringFromSelector(methods[i].name)]) {
-            char *types = malloc(strlen(methods[i].types) + 1);
-            strcpy(types, methods[i].types);
-            free(methods);
+    if (protocol != NULL && selector != NULL) {
+        struct objc_method_description desc = protocol_getMethodDescription(protocol, selector, isRequired, isInstanceMethod);
+        if (desc.name != NULL) {
+            char *types = malloc(strlen(desc.types) + 1);
+            strcpy(types, desc.types);
             return types;
         }
     }
-    free(methods);
     return NULL;
 }
 
@@ -542,23 +538,22 @@ static NSDictionary *defineClass(NSString *classDeclaration, JSValue *instanceMe
     
     NSString *className;
     NSString *superClassName;
-    NSString *protocolNames;
+    NSString *protocolDefine;
     [scanner scanUpToString:@":" intoString:&className];
     if (!scanner.isAtEnd) {
         scanner.scanLocation = scanner.scanLocation + 1;
         [scanner scanUpToString:@"<" intoString:&superClassName];
         if (!scanner.isAtEnd) {
             scanner.scanLocation = scanner.scanLocation + 1;
-            [scanner scanUpToString:@">" intoString:&protocolNames];
+            [scanner scanUpToString:@">" intoString:&protocolDefine];
         }
     }
     
     if (!superClassName) superClassName = @"NSObject";
     className = trim(className);
     superClassName = trim(superClassName);
-    
-    NSArray *protocols = [protocolNames length] ? [protocolNames componentsSeparatedByString:@","] : nil;
-    
+    protocolDefine = trim(protocolDefine);
+
     Class cls = NSClassFromString(className);
     if (!cls) {
         Class superCls = NSClassFromString(superClassName);
@@ -569,10 +564,15 @@ static NSDictionary *defineClass(NSString *classDeclaration, JSValue *instanceMe
         cls = objc_allocateClassPair(superCls, className.UTF8String, 0);
         objc_registerClassPair(cls);
     }
-    
-    if (protocols.count > 0) {
-        for (NSString* protocolName in protocols) {
-            Protocol *protocol = objc_getProtocol([trim(protocolName) cStringUsingEncoding:NSUTF8StringEncoding]);
+
+    NSMutableArray<Protocol *> *protocols = nil;
+    NSArray<NSString *> *protocolNames = [protocolDefine componentsSeparatedByString:@","];
+    NSUInteger protocolCount = protocolNames.count;
+    if (protocolCount > 0) {
+        protocols = [NSMutableArray arrayWithCapacity:protocolCount];
+        for (NSString *protocolName in protocolNames) {
+            Protocol *protocol = objc_getProtocol(protocolName.UTF8String);
+            [protocols addObject:protocol];
             class_addProtocol (cls, protocol);
         }
     }
@@ -581,7 +581,7 @@ static NSDictionary *defineClass(NSString *classDeclaration, JSValue *instanceMe
         BOOL isInstance = i == 0;
         JSValue *jsMethods = isInstance ? instanceMethods: classMethods;
         
-        Class currCls = isInstance ? cls: objc_getMetaClass(className.UTF8String);
+        Class currCls = isInstance ? cls : objc_getMetaClass(className.UTF8String);
         NSDictionary *methodDict = [jsMethods toDictionary];
         for (NSString *jsMethodName in methodDict.allKeys) {
             JSValue *jsMethodArr = [jsMethods valueForProperty:jsMethodName];
@@ -597,9 +597,10 @@ static NSDictionary *defineClass(NSString *classDeclaration, JSValue *instanceMe
                 overrideMethod(currCls, selectorName, jsMethod, !isInstance, NULL);
             } else {
                 BOOL overrided = NO;
-                for (NSString *protocolName in protocols) {
-                    char *types = methodTypesInProtocol(protocolName, selectorName, isInstance, YES);
-                    if (!types) types = methodTypesInProtocol(protocolName, selectorName, isInstance, NO);
+                SEL selector = NSSelectorFromString(selectorName);
+                for (Protocol *protocol in protocols) {
+                    char *types = methodTypesInProtocol(protocol, selector, isInstance, YES);
+                    if (!types) types = methodTypesInProtocol(protocol, selector, isInstance, NO);
                     if (types) {
                         overrideMethod(currCls, selectorName, jsMethod, !isInstance, types);
                         free(types);
@@ -963,13 +964,20 @@ static void _initJPOverideMethods(Class cls) {
 static void overrideMethod(Class cls, NSString *selectorName, JSValue *function, BOOL isClassMethod, const char *typeDescription)
 {
     SEL selector = NSSelectorFromString(selectorName);
-    
-    if (!typeDescription) {
-        Method method = class_getInstanceMethod(cls, selector);
-        typeDescription = (char *)method_getTypeEncoding(method);
+    Method method = NULL;
+    if (isClassMethod) {
+        method = class_getClassMethod(cls, selector);
+    } else {
+        method = class_getInstanceMethod(cls, selector);
     }
-    
-    IMP originalImp = class_respondsToSelector(cls, selector) ? class_getMethodImplementation(cls, selector) : NULL;
+
+    IMP originalImp = NULL;
+    if (method != NULL) {
+        if (!typeDescription) {
+            typeDescription = (char *)method_getTypeEncoding(method);
+        }
+        originalImp = class_getMethodImplementation(cls, selector);
+    }
     
     IMP msgForwardIMP = _objc_msgForward;
     #if !defined(__arm64__)
@@ -994,17 +1002,16 @@ static void overrideMethod(Class cls, NSString *selectorName, JSValue *function,
     }
 #pragma clang diagnostic pop
     [cls jp_fixMethodSignature];
-    if (class_respondsToSelector(cls, selector)) {
+    if (method != NULL) {
         NSString *originalSelectorName = [NSString stringWithFormat:@"ORIG%@", selectorName];
         SEL originalSelector = NSSelectorFromString(originalSelectorName);
         if(!class_respondsToSelector(cls, originalSelector)) {
             class_addMethod(cls, originalSelector, originalImp, typeDescription);
         }
     }
-    
-    NSString *JPSelectorName = [NSString stringWithFormat:@"_JP%@", selectorName];
-    
+
     _initJPOverideMethods(cls);
+    NSString *JPSelectorName = [NSString stringWithFormat:@"_JP%@", selectorName];
     _JSOverideMethods[cls][JPSelectorName] = function;
     
     // Replace the original selector at last, preventing threading issus when
@@ -1613,7 +1620,8 @@ static NSString *extractStructName(NSString *typeEncodeString)
 
 static NSString *trim(NSString *string)
 {
-    return [string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSArray *components = [string componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [components componentsJoinedByString:@""];
 }
 
 static BOOL blockTypeIsObject(NSString *typeString)

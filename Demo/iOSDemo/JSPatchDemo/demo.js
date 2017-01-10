@@ -41,3 +41,55 @@ defineClass('JPTableViewController : UITableViewController <UIAlertViewDelegate>
     console.log('click btn ' + alertView.buttonTitleAtIndex(idx).toJS())
   }
 })
+
+//replace method, add new instance method/property, add new class method, C function
+require('NSDate');
+require('JPEngine').addExtensions(['JPCFunction']);
+JPEngine.addExtensions(['JPMemory']);
+defineCFunction("NSClassFromString", "Class, id");
+defineCFunction("CFUUIDCreate", "void*, int");
+defineCFunction("CFUUIDCreateString", "void*, int, void*");
+defineClass("AppDelegate : UIResponder <UIApplicationDelegate,UIAlertViewDelegate>", ['genUUIDBegin','uuid','genUUIDUsedTime'], {
+  applicationDidBecomeActive: function(application) {
+    //self.ORIGapplicationDidBecomeActive(application);
+    //Call Class Method to genUUID
+    self.setGenUUIDBegin(NSDate.date());
+    console.log('genUUIDBegin=' + self.genUUIDBegin().description().toJS());
+    var uuid = require('AppDelegate').genUUID();
+    console.log("[Class genUUID]=" + uuid.toJS());
+    self.setUuid(uuid);
+    console.log("uuid property value=" + self.uuid().toJS());
+    var endDate = NSDate.date();
+    console.log('endDate=' + endDate.description().toJS());
+    self.setGenUUIDUsedTime(endDate.timeIntervalSinceDate(self.genUUIDBegin()));
+    console.log('Call Class Method: genUUID used time=' + self.genUUIDUsedTime());
+
+    //Call Embeded GEN UUID CODES
+    self.setGenUUIDBegin(NSDate.date());
+    console.log('genUUIDBegin=' + self.genUUIDBegin().description().toJS());
+    var uuidRef = CFUUIDCreate(0);
+    var uuidStringRef = CFUUIDCreateString(0, uuidRef);
+    var uuid = require('NSString').stringWithString(__bridge_id(uuidStringRef));
+    CFRelease(uuidRef);
+    CFRelease(uuidStringRef);
+    console.log("uuid=" + uuid.toJS());
+    self.setUuid(uuid);
+    console.log("uuid property value=" + self.uuid().toJS());
+    var endDate = NSDate.date();
+    console.log('endDate=' + endDate.description().toJS());
+    self.setGenUUIDUsedTime(endDate.timeIntervalSinceDate(self.genUUIDBegin()));
+    console.log('Call Embeded GEN UUID CODES used time=' + self.genUUIDUsedTime());
+  }
+}, 
+{
+  genUUID: function() {
+    console.log('Calling genUUID...');
+    var uuidRef = CFUUIDCreate(0);
+    var uuidStringRef = CFUUIDCreateString(0, uuidRef);
+    var uuid = require('NSString').stringWithString(__bridge_id(uuidStringRef));
+    CFRelease(uuidRef);
+    CFRelease(uuidStringRef);
+    console.log('Will return from genUUID');
+    return uuid;
+  },
+})
